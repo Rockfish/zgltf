@@ -79,7 +79,7 @@ pub const BufferView = struct {
     /// The offset into the buffer in bytes.
     byte_offset: usize = 0,
     /// The stride, in bytes.
-    byte_stride: ?usize = null,
+    byte_stride: usize = 0,
     /// The hint representing the intended GPU buffer type
     /// to use with this buffer view.
     target: ?Target = null,
