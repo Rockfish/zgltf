@@ -5,8 +5,10 @@
 const Self = @This();
 
 const std = @import("std");
+const core = @import("core");
 const helpers = @import("helpers.zig");
 const types = @import("types.zig");
+const _texture = @import("../../texture.zig");
 
 const mem = std.mem;
 const math = std.math;
@@ -43,7 +45,7 @@ pub const Attribute = types.Attribute;
 pub const Mode = types.Mode;
 pub const ComponentType = types.ComponentType;
 pub const Target = types.Target;
-pub const MetallicRoughness = types.MetallicRoughness;
+pub const PbrMetallicRoughness = types.PbrMetallicRoughness;
 pub const AnimationSampler = types.AnimationSampler;
 pub const Channel = types.Channel;
 pub const MagFilter = types.MagFilter;
@@ -77,7 +79,14 @@ pub const Data = struct {
 arena: *ArenaAllocator,
 data: Data,
 
-glb_binary: ?[]align(4) const u8 = null,
+// glb_binary: ?[]align(4) const u8 = null,
+// TODO: consider moving these to a wrapper class
+buffer_data: ArrayList([]align(4) const u8),
+
+// TODO: refactor so that we know the number of texture before
+// defining loaded_textures so we can use an array instead of a map.
+loaded_textures: std.AutoHashMap(usize, *const _texture.Texture),
+//loaded_textures: ArrayList(?*const _texture.Texture),
 
 pub fn init(allocator: Allocator) Self {
     var arena = allocator.create(ArenaAllocator) catch {
@@ -89,6 +98,9 @@ pub fn init(allocator: Allocator) Self {
     const alloc = arena.allocator();
     return Self{
         .arena = arena,
+        .buffer_data = ArrayList([]align(4) const u8).init(alloc),
+        //.loaded_textures = ArrayList(?*const _texture.Texture).initCapacity(alloc),
+        .loaded_textures = std.AutoHashMap(usize, *const _texture.Texture).init(alloc),
         .data = .{
             .asset = Asset{ .version = "Undefined" },
             .scenes = ArrayList(Scene).init(alloc),
@@ -109,6 +121,17 @@ pub fn init(allocator: Allocator) Self {
     };
 }
 
+pub fn deinit(self: *Self) void {
+    var iterator = self.loaded_textures.valueIterator();
+    std.debug.print("gltf.deinit freeing textures\n", .{});
+    while (iterator.next()) |val| {
+        std.debug.print("  texture id: {d}\n", .{val.*.gltf_texture_id});
+        val.*.deinit();
+    }
+    self.arena.deinit();
+    self.arena.child_allocator.destroy(self.arena);
+}
+
 /// Fill data by parsing a glTF file's buffer.
 pub fn parse(self: *Self, file_buffer: []align(4) const u8) !void {
     if (isGlb(file_buffer)) {
@@ -123,6 +146,7 @@ pub fn debugPrint(self: *const Self) void {
         \\
         \\  glTF file info:
         \\
+        \\    Scene      {any}
         \\    Node       {}
         \\    Mesh       {}
         \\    Skin       {}
@@ -134,6 +158,7 @@ pub fn debugPrint(self: *const Self) void {
     ;
 
     print(msg, .{
+        self.data.scene,
         self.data.nodes.items.len,
         self.data.meshes.items.len,
         self.data.skins.items.len,
@@ -237,11 +262,6 @@ pub fn getDataFromBufferView(
         const slice = (data + offset + current_count * stride)[0..datum_count];
         list.appendSlice(slice) catch unreachable;
     }
-}
-
-pub fn deinit(self: *Self) void {
-    self.arena.deinit();
-    self.arena.child_allocator.destroy(self.arena);
 }
 
 pub fn getLocalTransform(node: Node) Mat4 {
@@ -360,8 +380,9 @@ fn parseGlb(self: *Self, glb_buffer: []align(4) const u8) !void {
         break :blk binary;
     };
 
+    try self.buffer_data.append(binary_buffer);
+
     try self.parseGltfJson(json_buffer);
-    self.glb_binary = binary_buffer;
 
     const buffer_views = self.data.buffer_views.items;
 
@@ -632,6 +653,14 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
                             );
                         }
 
+                        if (attributes.object.get("COLOR_0")) |color| {
+                            try primitive.attributes.append(
+                                .{
+                                    .color = parseIndex(color),
+                                },
+                            );
+                        }
+
                         const texcoords = [_][]const u8{
                             "TEXCOORD_0",
                             "TEXCOORD_1",
@@ -709,7 +738,6 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
                 .component_type = undefined,
                 .type = undefined,
                 .count = undefined,
-                .stride = undefined,
             };
 
             if (object.get("componentType")) |component_type| {
@@ -719,7 +747,7 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
             }
 
             if (object.get("count")) |count| {
-                accessor.count = @as(i32, @intCast(count.integer));
+                accessor.count = @as(usize, @intCast(count.integer));
             } else {
                 panic("Accessor's count is missing.", .{});
             }
@@ -758,25 +786,6 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
                 accessor.byte_offset = @as(usize, @intCast(byte_offset.integer));
             }
 
-            const component_size: usize = switch (accessor.component_type) {
-                .byte => @sizeOf(i8),
-                .unsigned_byte => @sizeOf(u8),
-                .short => @sizeOf(i16),
-                .unsigned_short => @sizeOf(u16),
-                .unsigned_integer => @sizeOf(u32),
-                .float => @sizeOf(f32),
-            };
-
-            accessor.stride = switch (accessor.type) {
-                .scalar => component_size,
-                .vec2 => 2 * component_size,
-                .vec3 => 3 * component_size,
-                .vec4 => 4 * component_size,
-                .mat2x2 => 4 * component_size,
-                .mat3x3 => 9 * component_size,
-                .mat4x4 => 16 * component_size,
-            };
-
             try self.data.accessors.append(accessor);
         }
     }
@@ -808,6 +817,10 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
 
             if (object.get("target")) |target| {
                 buffer_view.target = @as(Target, @enumFromInt(target.integer));
+            }
+
+            if (object.get("name")) |name| {
+                  buffer_view.name = try alloc.dupe(u8, name.string);
             }
 
             try self.data.buffer_views.append(buffer_view);
@@ -881,7 +894,7 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
             }
 
             if (object.get("pbrMetallicRoughness")) |pbrMetallicRoughness| {
-                var metallic_roughness: MetallicRoughness = .{};
+                var metallic_roughness: PbrMetallicRoughness = .{};
                 if (pbrMetallicRoughness.object.get("baseColorFactor")) |color_factor| {
                     for (color_factor.array.items, 0..) |factor, i| {
                         metallic_roughness.base_color_factor[i] = parseFloat(f32, factor);
@@ -924,7 +937,7 @@ fn parseGltfJson(self: *Self, gltf_json: []const u8) !void {
                     }
                 }
 
-                material.metallic_roughness = metallic_roughness;
+                material.pbr_metallic_roughness = metallic_roughness;
             }
 
             if (object.get("normalTexture")) |normal_texture| {

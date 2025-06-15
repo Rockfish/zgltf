@@ -18,6 +18,15 @@ pub const Index = usize;
 ///
 /// When a node is targeted for animation (referenced by
 /// an animation.channel.target), matrix must not be present.
+///
+/// from spec: Only the joint transforms are applied to the skinned mesh;
+///            the transform of the skinned mesh node MUST be ignored.
+///
+///            The global transformation matrix of a node is the product of
+///            the global transformation matrix of its parent node and its
+///            own local transformation matrix. When the node has no parent node,
+///            its global transformation matrix is identical to its local transformation matrix.
+///
 pub const Node = struct {
     /// The user-defined name of this object.
     /// Default to `Node_{index}`.
@@ -74,6 +83,12 @@ pub const BufferView = struct {
     /// The hint representing the intended GPU buffer type
     /// to use with this buffer view.
     target: ?Target = null,
+    /// The user-defined name of this object.
+    name: ?[]const u8 = null,
+    // JSON object with extension-specific objects.
+    // extensions: ?Extension = null,
+    // Application-specific data.
+    // extras: ?Extras = null,
 };
 
 /// A typed view into a buffer view that contains raw binary data.
@@ -86,12 +101,33 @@ pub const Accessor = struct {
     component_type: ComponentType,
     /// Specifies if the accessor’s elements are scalars, vectors, or matrices.
     type: AccessorType,
-    /// Computed stride: @sizeOf(component_type) * type.
-    stride: usize,
     /// The number of elements referenced by this accessor.
     count: i32,
     /// Specifies whether integer data values are normalized before usage.
     normalized: bool = false,
+
+    pub fn getComponentSize(accessor: Accessor) usize {
+        return switch (accessor.component_type) {
+            .byte => @sizeOf(i8),
+            .unsigned_byte => @sizeOf(u8),
+            .short => @sizeOf(i16),
+            .unsigned_short => @sizeOf(u16),
+            .unsigned_integer => @sizeOf(u32),
+            .float => @sizeOf(f32),
+        };
+    }
+
+    pub fn getTypeSize(accessor: Accessor) usize {
+        return switch (accessor.type) {
+            .scalar => 1,
+            .vec2 => 2,
+            .vec3 => 3,
+            .vec4 => 4,
+            .mat2x2 => 4,
+            .mat3x3 => 9,
+            .mat4x4 => 16,
+        };
+    }
 
     pub fn iterator(
         accessor: Accessor,
@@ -126,21 +162,12 @@ pub const Accessor = struct {
             if (buffer_view.byte_stride) |byte_stride| {
                 break :blk byte_stride / comp_size;
             } else {
-                break :blk accessor.stride / comp_size;
+                break :blk accessor.getTypeSize();
             }
         };
 
         const total_count: usize = @intCast(accessor.count);
-        const datum_count: usize = switch (accessor.type) {
-            .scalar => 1,
-            .vec2 => 2,
-            .vec3 => 3,
-            .vec4 => 4,
-            .mat4x4 => 16,
-            else => {
-                panic("Accessor type '{}' not implemented.", .{accessor.type});
-            },
-        };
+        const datum_count: usize = accessor.getTypeSize();
 
         const data: [*]const T = @ptrCast(@alignCast(binary.ptr));
 
@@ -168,7 +195,9 @@ pub fn AccessorIterator(comptime T: type) type {
 
         /// Returns the next element of the accessor, or null if iteration is done.
         pub fn next(self: *@This()) ?[]const T {
-            if (self.current >= self.total_count) return null;
+            if (self.current >= self.total_count) { 
+                return null;
+            }
 
             const slice = (self.data + self.offset + self.current * self.stride)[0..self.datum_count];
             self.current += 1;
@@ -202,6 +231,13 @@ pub const Skin = struct {
     name: []const u8,
     /// The index of the accessor containing the floating-point
     /// 4x4 inverse-bind matrices.
+    // TODO: Double check this comment: 
+    //       the inverse_bind_matrices is an index to the accessor that has a list of
+    //       matrices to be used as inverse bind matrices. The joints list is a list
+    //       of which matrix in the accessor list go with which joint.
+    //       The order of the matrices in the inverseBindMatrices accessor must
+    //       match the order of the joints listed in the joints array.
+    //       Is this were the bone offset matrix come from in ASSIMP?
     inverse_bind_matrices: ?Index = null,
     /// The index of the node used as a skeleton root.
     skeleton: ?Index = null,
@@ -244,7 +280,7 @@ const OcclusionTextureInfo = struct {
 /// A set of parameter values that are used to define
 /// the metallic-roughness material model
 /// from Physically-Based Rendering methodology.
-pub const MetallicRoughness = struct {
+pub const PbrMetallicRoughness = struct {
     /// The factors for the base color of the material.
     base_color_factor: [4]f32 = [_]f32{ 1, 1, 1, 1 },
     /// The base color texture.
@@ -264,7 +300,7 @@ pub const Material = struct {
     /// A set of parameter values that are used to define
     /// the metallic-roughness material model
     /// from Physically Based Rendering methodology.
-    metallic_roughness: MetallicRoughness = .{},
+    pbr_metallic_roughness: PbrMetallicRoughness = .{},
     /// The tangent space normal texture.
     normal_texture: ?NormalTextureInfo = null,
     /// The occlusion texture.
@@ -396,7 +432,7 @@ pub const TextureSampler = struct {
     wrap_t: WrapMode = .repeat,
 };
 
-/// Values are Accessor's index.
+/// The value of the Attribute is the index to the Accessor with the data.
 pub const Attribute = union(enum) {
     position: Index,
     normal: Index,
